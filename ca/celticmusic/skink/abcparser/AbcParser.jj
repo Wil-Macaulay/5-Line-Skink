@@ -1,0 +1,1958 @@
+
+/**
+ *
+ *  abc parser 
+ *
+ *   0.01 Nov 3 1998 Wil Macaulay
+ *        Note: the parser does not parse header lines, just
+ *              creates a token for each
+ *   0.02 May 3 1999 WM
+ *        Info header fields.
+ *   0.03 May 6 1999 WM
+ *        Chords (multinote)
+ *   0.04 May 7 1999 WM
+ *        Tuplets 
+ *   0.05 May 12 199 WM
+ *        handle free text between tunes
+ *        note that quoted strings in productions are not used except in
+ *        default state
+ *   0.06 May 26 1999 WM
+ *        getTuneBook
+ *   0.07 May 9 2000 WM
+ *        comments in header and tune
+ *   0.08 May 10 2000 WM
+ *        mid-tune field lines except elemskip
+ *   0.09 May 15 2000 WM
+ *        This version uses lookahead to do the broken rhythm - unfortunately,
+ *        there can in principle be arbitrarily many terms in the expansion (multielements,
+ *        for example) so I have to give up this approach and go back to broken as
+ *        a part of the element (not its own element)
+ *   0.10 May 31 2000 WM
+ *        first (pre) release version.  Needs work on lexical states when
+ *        processing text lines, etc.
+ *   0.11 Mar 19 2001 WM
+ *        Support for invisible rests (x, y)
+ *        July 7 2001 WM
+ *        W: in the header is also used
+ *        July 10 2001 WM
+ *        ignore \ lines (TeX)
+ *        July 13 2001
+ *        support + format for chords
+ *        Nov 2001 
+ *        inline fields
+ *        Dec 2001 F: in header
+ *   0.9c Jan 2002 
+ *        163. general problem with empty fields "W:"
+ *   0.9d Jan 14 - clean up lexer, comment fields
+ *        Jan 21 - trailing spaces in L: fields
+ *  1.0a  Mar 2 2002 minor mods while refactoring AbcElement 
+ *        Mar25 2002 adjust parsing of > to allow whitespace
+ *        Mar 29 2002 aligned word fields (incomplete)
+ *  1.0a4 11 Jun 2002 !xxx! fields as guitar chords
+ *  1.0a5 22 Jun 2002 ignore field length in gracenotes
+ *  1.0a6 2 Jul 2002 w: field finished
+ *  1.0a7 10 Jul 2002 clean up line ending problems in lexer
+ *  1.0b1 16 jul 2002 error recovery on parser
+ *  1.0d1 17 sep 2002 tuplet handling
+ *  1.1e1 10 jan 2003 tempo 
+ *  1.1e2 20 jan 2003 comment, H: handling
+ *  1.1f2  8 May 2004 (p::q tuplet problem
+ *                    clean up comment handling 
+ *					  relax restrictions on T: being immediately after X:
+ *  1.2a0  2 Jul 2004 move new Line code into Tune - update Line context improvements 
+ *  1.2a2  18 Aug 2004 move grace note context into Line
+ *  2.0a0  14 jul 2005 key, clef, etc, eclipse build 
+ *  2.0a1  31 Dec 2005 refactoring
+ *  2.0a2  29 Jan 2006 more refactoring, voice
+ *  2.0c1  19 feb 2007 package move
+ *
+ **/
+
+options {
+    STATIC=false;
+    DEBUG_LOOKAHEAD=true;
+    DEBUG_PARSER=true;
+    //DEBUG_TOKEN_MANAGER=true;
+    }
+
+PARSER_BEGIN(AbcParser)
+
+package ca.celticmusic.skink.abcparser;
+
+import java.io.*;
+import ca.celticmusic.skink.*;
+
+
+public class AbcParser 
+   {
+   TuneBook theBook = new TuneBook();
+   InputStreamReader inR = new InputStreamReader(System.in);
+   BufferedReader bufIn = new BufferedReader(inR);
+   Tuplet localTuplet = null; // kludge for lookahead
+
+   public static void main(String args[])throws ParseException
+      {
+      Debug.init();
+      if (args.length < 1) 
+         {
+	 System.err.println("usage: AbcParser <abcfile> [-debug]");
+	 System.exit(1);
+	 }
+
+      String inFile = args[0];
+      Debug.output(2,"Input file "+inFile);
+      // open an input stream
+      try {
+	
+         FileReader fr = new FileReader(inFile);
+
+         //AbcParser parser = new AbcParser(System.in);
+         AbcParser parser = new AbcParser(fr);
+         Debug.output(2,"parsing...");
+	 parser.disable_tracing();
+	 if (args.length == 2)
+	      parser.enable_tracing();
+         parser.AbcFile();
+         parser.show();
+	 }
+      catch (IOException e) {
+	 System.err.println(e);
+	 }
+      }
+
+   public TuneBook getTuneBook()
+      {
+      return theBook;
+      }
+
+   public void show()
+      {
+      theBook.listTunes();
+      while(true)
+	 {
+	 try
+	    {
+            doCommand();
+	    }
+         catch(IOException e) {
+            
+	    System.err.println(e);
+            }
+         }
+      }
+
+   public void doCommand() throws IOException
+      {
+      System.out.print("abc> ");
+      String cmd = bufIn.readLine();
+      if (cmd.equals("list")) 
+	 {
+	 theBook.listTunes();
+	 }
+      else if (cmd.equals("quit"))
+	      {
+	      System.exit(1);
+	      }
+      else if (cmd.equals("dump"))
+	      {
+	      theBook.dumpTunes();
+	      }
+           else 
+	      {
+	      System.err.println("not understood");
+	      }
+      }
+   }
+
+
+
+
+
+
+
+PARSER_END(AbcParser)
+
+void AbcFile() :
+   {
+   }
+   {
+   (AbcTune() | AbcComment() | AbcText() | Eol() )* <EOF> 
+   }
+   
+void AbcComment() :
+   {
+   Token comment;
+   }
+   {
+   comment = <COMMENTLINE> 
+   (Eol() | <EOF> )
+      {
+      Debug.output(2,"comment-->"+comment.image);
+      }
+   }
+    
+void AbcText() :
+   {
+   FreeText theText = new FreeText();
+   //theBook.addText(theText);
+   }
+   {
+   (LOOKAHEAD(2)  
+       TextLine(theText))+
+   }
+
+
+void TextLine(FreeText theText) :
+   {
+   Token textLine = null;
+   }
+   {
+   textLine = <TEXTLINE> [<COMMENTLINE>]
+   (Eol() | <EOF>)
+      {
+      Debug.output(2,"free text-->"+textLine.image);
+      }
+   }
+
+
+void Eol() :  // match EOL in any lexer state
+   {
+   }
+   {
+   <EOL> | <AW_EOL> | <KEY_EOL> | <HIST_EOL> | <VOICE_EOL> | <VOICE_TUNE_EOL>
+   }
+
+void AbcTune() :
+
+   {
+   Tune theTune = new Tune();
+   theBook.addTune(theTune);
+   }
+   {
+   try {
+   AbcHeader(theTune) AbcMusic(theTune)
+      {
+      theBook.endTune();
+      }
+   }
+   catch (ParseException e){
+    Token t;
+    Token lastTok = e.currentToken;
+   /* Debug.output(1,"found parser error at line "+lastTok.next.beginLine+" col "+lastTok.next.beginColumn);
+    
+    e.printStackTrace();*/
+
+    theTune.setErrorDetected(e);
+    theBook.endTune(); 
+    do { 
+       t= getNextToken();
+       } while ((t.kind != ENDOFTUNE)  && (t.kind != EOF));
+    }   
+   }
+
+void AbcHeader(Tune theTune) :
+   {
+      String theIndex = null;
+      String theKey   = null;
+   }
+   {
+   theIndex = FieldNumber(theTune) Eol()
+     {
+     theTune.setIndex(theIndex);
+     theTune.addInfo(new InfoField("X",theIndex));
+     }
+  (OtherField(theTune) Eol())*   // optional other fields 
+   (theKey = FieldKey(theTune) [<COMMENT>] Eol())
+     {
+      theTune.addInfo(new InfoField("K",theKey));
+     }
+   }
+
+String FieldNumber(Tune theTune):
+   {
+   String index=null;
+   Token iTok = null;  // need this token to get start of tune in buffer
+   }
+   {
+  iTok = <INDEX> [<WHITESPACE>] 
+   index = Digits() [<WHITESPACE>][<COMMENT>]
+ 
+     {
+     theTune.setStart(iTok.beginLine,0);
+     return index;
+     }
+   }
+
+String Digits() :
+   {
+   Token theDigits = null;
+   }
+   {
+   (theDigits = <DIGITS> | theDigits = <HDIGITS>)   // equivalent token in different states
+      {
+      return theDigits.image;
+      }
+   }
+
+void TitleField(Tune theTune) :
+   {
+      Token titleToken = null;
+      InfoField titleField = null;
+   }
+   {
+      titleToken = <TITLE>
+      {
+          titleField = new InfoField(titleToken.image);
+          theTune.addInfo(titleField);
+          theTune.setTitle(titleField.getInfoString());
+      }    
+   }
+
+void OtherField(Tune theTune) :
+   {
+   	   InfoField theField = null;
+   }
+   {
+     ( StructuredField(theTune) [<COMMENT>] )
+   | ( theField = FreeTextField(theTune)   [<COMMENT>] )
+   		{
+   		theTune.addInfo(theField);
+   		}
+   | ( HistoryField(theTune)    [<COMMENT>] )
+   | ( VoiceField(theTune) 		[<COMMENT>] )
+   | ( TitleField(theTune)      [<COMMENT>] )
+   | <COMMENT>
+   }
+   
+void StructuredField(Tune theTune) : { 
+   InfoField theField = new InfoField();
+   String m = null;
+   String defLen;
+   }
+   {
+   (defLen = FieldDefaultLength()) { // note: does not handle L:3/2 (!) etc
+        theTune.setDefaultNote(Integer.parseInt(defLen));
+        theField.setCode("L");
+        theField.setInfoString("1/"+defLen);
+        } 
+   |(  m = FieldMeter() {
+        theField.setCode("M");
+        theField.setInfoString(m);
+        theTune.setMeter(m);
+        }
+     )  
+   | (m = FieldTempo(theTune) {
+        theField.setCode("Q");
+        theField.setInfoString(m);
+        }
+     )   
+        
+   | FieldParts()
+   }
+// token contains both the field id and the contents
+InfoField FreeTextField(Tune theTune):{  Token fieldToken = null;}{  (fieldToken = <AREA>  | fieldToken = <BOOK>  | fieldToken = <COMPOSER>  | fieldToken = <DISC>  | fieldToken = <ELEMSKIP>  | fieldToken = <FILE>  | fieldToken = <GROUP>  | fieldToken = <INFO>  | fieldToken = <NOTES>  | fieldToken = <ORIGIN>  | fieldToken = <RHYTHM>  | fieldToken = <SOURCE>  | fieldToken = <WORDS>  | fieldToken = <TRANSNOTES>  | fieldToken = <TEXHEADER>){    return (new InfoField(fieldToken.image));  }}
+   
+// not all fields are permitted inside a tune, to avoid ambiguity   
+InfoField InTuneFreeTextField(Tune theTune) :
+   {
+
+   Token fieldToken = null;
+   }
+   {
+   (
+     fieldToken = <INFO>
+   | fieldToken = <NOTES>
+   | fieldToken = <ORIGIN>
+   | fieldToken = <RHYTHM> 
+   | fieldToken = <SOURCE> 
+   | fieldToken = <WORDS>
+   | fieldToken = <TRANSNOTES>
+   | fieldToken = <TEXHEADER>  
+   )
+    {
+      return(new InfoField(fieldToken.image));
+    }
+   }
+void VoiceField(Tune theTune) :
+   {
+   InfoField theField = null;
+   }
+   {
+   (<VOICE> | <VOICE_CHANGE>)  
+    theField = FieldVoice(theTune)
+         {
+         theTune.addInfo(theField);    
+         } 
+   }
+   
+InfoField FieldVoice(Tune theTune) :
+   {
+   InfoField theField = null;
+   String id = null;
+   String voiceDef = null;
+   } 
+   {
+   ( id = VoiceId(theTune)(VoiceDefinition(theTune,voiceDef))* )
+      {
+      theField = new InfoField("V",id+" "+voiceDef);
+      return theField;
+      }
+    }
+
+String VoiceId (Tune theTune) :
+   {
+   String voiceId;
+   }
+   {
+   (voiceId = <VOICE_ID>.image | voiceId = <VOICE_DIGITS>.image) // can be a number or identifier (2 or S2), not (e.g.) 2S
+   {
+       theTune.setVoice(voiceId);  // finds it if it exists, creates it if not
+       return voiceId;
+   }
+   }
+
+// sets up the current voice   
+String VoiceDefinition(Tune theTune,String voiceDef) :
+   {
+   String subDef = "";
+   }
+   {
+   ( (subDef = ClefSpec(theTune))       |
+     //FIXME NYI(subDef = VoiceStems(theTune))     |
+     //FIXME NYI(subDef = VoiceMerge(theTune))     |
+     (subDef = VoiceName(theTune))      |
+     (subDef = VoiceSubName(theTune))     )
+         {
+         return (voiceDef + " " + subDef);
+         }
+   }  
+   
+// define the voice name
+String VoiceName(Tune theTune) :
+   {
+   String theName;
+   }
+   {
+   (<VOICE_NAME><KV_EQUALS>) 
+   (theName=VoiceQuotedString())
+       {
+       theTune.setVoiceName(theName);
+       return("name=\""+theName+"\"");
+       }
+   }
+
+// define the voice subname
+String VoiceSubName(Tune theTune) :
+   {
+   String theSubName;
+   }
+   {
+   (<VOICE_SUBNAME><KV_EQUALS>) 
+   (theSubName=VoiceQuotedString())
+       {
+       theTune.setVoiceSubName(theSubName);
+       return("subname=\""+theSubName+"\"");
+       }
+   }
+
+String VoiceQuotedString() :
+   {
+   String contents;
+   }
+   {
+   contents = <VOICE_QSTRING>.image
+     {
+     return contents.substring(1,(contents.length()-1));
+     }
+   }
+// define the stem treatment//FIXME not yet implemented  
+
+// define the transposition//FIXME not yet implemented  
+
+// merge voices on a staff //FIXME not yet implemented   
+              
+// FIXME only preserving the first line of an H: field
+void HistoryField(Tune theTune) :
+   {
+   InfoField theField = new InfoField();
+   String infoString = " ";
+   }
+   {
+   (
+   <HISTORY> {
+       theField.setCode("H");
+       Debug.output(1,"History field started");
+       }
+   )
+     [infoString = Text()] (LOOKAHEAD (2) Eol() (<MOREHIST2>))*
+    {
+     theField.setInfoString(infoString);
+     theTune.addInfo(theField);
+    }
+   }
+
+String Text():
+   {
+   Token rol = null;
+   }
+   {
+  ( rol = <RESTOFLINE> | rol = <MOREHIST> )
+      {
+      return rol.image;
+      }
+   }
+
+String FieldDefaultLength() :
+   {
+   String denom;
+   }
+   {
+   ((<LENGTH> | <LENGTHCHANGE>) (denom = NoteLengthStrict()) [<WHITESPACE>])
+       {
+       return denom;
+       }
+   }
+
+String NoteLengthStrict():
+   {
+   String denom;
+   }
+   {
+  ( [<WHITESPACE>] Digits() (<SLASH>) (denom = Digits()))
+       {
+       return denom;
+       }
+   }
+
+String FieldMeter():
+   {
+   String theMeter;
+   }
+   {
+   ((<METER> | <METERCHANGE>)( theMeter = Meter()) )
+       {
+       return theMeter;
+       }
+   }
+
+String Meter():
+   {
+   Token rol = null;
+   }
+   {
+   rol = RestOfLine()
+      {
+      return rol.image;
+      }
+   }
+
+String FieldKey(Tune theTune):
+   {
+   String theKey;
+   }
+   {
+   ((<KEY>|<KEYCHANGE>) (theKey = Key(theTune)))
+      {
+      return theKey;
+      }
+   }
+
+
+String Key(Tune theTune):
+   {
+   String theKey  = null;
+   String theClef = null;
+   }
+   {
+   (theKey = KeySpec(theTune) [ theClef = ClefSpec(theTune)] )
+      {
+      return theKey + theClef;
+      }
+   }
+
+String KeySpec(Tune theTune):
+   {
+   String theKey = null;
+   }
+   {
+   (theKey = <KV_NONE>.image | theKey = KeyHighlandPipes(theTune) | theKey = KeyTonicMode(theTune) )
+       {
+       theTune.setKey(theKey);
+       return theKey;
+       }
+   }
+   
+String KeyHighlandPipes(Tune theTune):
+   {
+   String theKey = null;
+   }   
+   {
+   (theKey = <KEY_HP1>.image | theKey = <KEY_HP2>.image)
+       {
+       return theKey;
+       }
+   }
+String KeyTonicMode(Tune theTune):
+   {
+   String theTonic = "C";
+   String theMode = "";
+   }
+   {
+   theTonic = KeyTonic() [theMode = KeyMode() ]
+       {
+       return theTonic + theMode;
+       }
+   }    
+
+String KeyTonic():
+   {
+   Token tok = null;
+   }
+   {
+   tok = <KEY_TONIC>
+      {
+      return tok.image;
+      }
+   }
+
+String KeyMode():
+   {
+   Token tok;
+   } 
+   {
+   tok = <KEY_MODE> 
+       {
+       return tok.image;
+       }
+   } 
+           
+String ClefSpec(Tune theTune):
+   {
+   String theClef = null;
+   }
+   {
+   (LOOKAHEAD(2) theClef = ClefSubSpec(theTune,theClef))+
+       {
+       return theClef;
+       }
+   }
+
+String ClefSubSpec(Tune theTune, String theClef) :
+   {
+   String subClef;
+   }
+   {
+    (  
+      subClef = Clef(theTune) 
+    //FIXME NYI | subClef = Transpose(theTune,subClef)
+    | subClef = Middle(theTune)
+    )
+       {
+       return subClef;
+       }  
+   }
+   
+   
+String Clef(Tune theTune):
+   {
+   String theClef = null;
+   } 
+   {  
+   ([ClefEquals()] theClef = ClefType())
+   		{
+   		theTune.setClef(theClef);
+   		return " clef="+theClef;
+   		}
+   }
+void ClefEquals():
+   {
+   }
+   {
+   ( <CLEF_CLEF>  <KV_EQUALS> )
+   }
+   	
+String ClefType():
+   {
+   String theClef = null;
+   }
+   {
+   ((theClef = <CLEF_TYPE>.image) | (theClef = <KV_NONE>.image) )
+   		{
+   		return theClef;
+   		}
+   }		
+String Middle(Tune theTune) :
+   {
+   String midNote = null;
+   }
+   {
+   (<CLEF_MIDDLE><KV_EQUALS> ( midNote = <VOICE_ID>.image | midNote = <KEY_TONIC>.image) )
+       {
+       theTune.setMiddleNoteName(midNote);
+       return "middle="+midNote;
+       }
+   }          
+String FieldTempo(Tune theTune):
+   {
+   String theTempo;
+   }
+   {
+   ((<TEMPO>|<TEMPOCHANGE>) (theTempo = Tempo(theTune)) [<WHITESPACE>])
+      {
+      return theTempo;
+      }
+   }
+
+String Tempo(Tune theTune): {
+   String beat = "";
+   String tempoBpm;
+   }
+   {
+   ([LOOKAHEAD(2) beat = TempoBeat(theTune)] (tempoBpm = TempoBpm(theTune)))
+       {
+       return (beat+tempoBpm);
+       }
+   }
+
+String TempoBeat(Tune theTune): {
+  String num;
+  String denom;
+  }
+  {
+  ([<WHITESPACE>] (num=Digits()) (<SLASH>) (denom=Digits()) [<WHITESPACE>] <EQUALS>)
+     {
+     theTune.setTempoBeat(num,denom);
+     return (num+"/"+denom+"=");
+     }
+  }   
+
+String TempoBpm(Tune theTune): {
+   String bpm;
+   }
+   {
+   ([<WHITESPACE>] (bpm=Digits()  ) )
+      {
+      theTune.setTempoBpm(bpm);
+      return bpm;
+      }
+   }
+// FIXME should be able to use same production in tune body and header   
+String FieldTitle():
+   {
+   String theTitle = "";
+   Token titleToken;
+   } 
+   {
+   titleToken = <TITLE>
+       {
+       return titleToken.image.substring(2);
+       }
+   }    
+String TitleText() :
+   {              
+   Token titleToken = null;
+   }
+   {
+   titleToken = RestOfLine()
+      {
+      return titleToken.image;
+      }
+   }
+      
+void FieldWordsAligned(Tune theTune):
+   {
+   AlignedWords aWords = new AlignedWords();
+   Token tok = null;
+   }
+   {
+   (<WORDS_ALIGNED>)
+     (<AW_NEXTBAR> {
+        aWords.nextBar();
+        }
+      | <AW_LITDASH> {
+        aWords.litDash();
+        }
+      | <AW_SYLBREAK> {
+        aWords.sylBreak();
+        }
+      | <AW_HOLDSYL> {
+        aWords.holdSyl();
+        }
+      | <AW_SKIP> {
+        aWords.skip();
+        }
+      | <AW_JOIN> {
+        aWords.join();
+        }
+      | <AW_TEXESCAPE> {
+        aWords.escapedChar(tok.image);
+        }  
+      | <AW_CONTINUE>
+      | <AW_WSPACE> {
+        aWords.breakWord(); 
+        }
+      | tok = <AW_WORD> {
+        aWords.word(tok.image);
+        }
+       )* {
+            
+      theTune.addAlignedWords(aWords);
+      }
+   }
+  
+           
+String FieldParts():
+   {
+   String theParts;
+   }
+   {
+   (<PARTS> | <PARTCHANGE>)[ theParts = Parts() 
+      {
+      return theParts;
+      }]
+      {
+      return "";
+      }
+   }
+         
+      
+String Parts():
+   {
+   Token rol = null;
+   }
+   {
+   rol = RestOfLine()
+      {
+      return rol.image;
+      }
+   }
+
+// match rest of line in any lex state
+Token RestOfLine() :
+   {
+   Token tok = null;
+   }
+   {
+   
+   ((tok = <RESTOFLINE>)
+   | (tok = <RESTOFFIELD>))
+        {
+        return tok;
+        }
+   }     
+
+
+void AbcMusic(Tune theTune) :
+   {
+   }
+   {
+   AbcLine(theTune) 
+   ( LOOKAHEAD(2) LineEnder(theTune) ( AbcLine(theTune)))*
+   EndOfTune()
+   }
+
+void AbcLine(Tune theTune) :
+   {
+      Line theLine = theTune.getNewLine();  // Tune will update the Line context
+      InfoField theField = null;
+      boolean resetLine = false;  // reset after an element?
+   }
+   {
+   
+   (InTuneField(theTune,theLine) [<COMMENT>])
+       { 
+       theTune.newLine(theLine);
+       }
+    | 
+    ( VoiceField(theTune) 		[<COMMENT>] ) 
+    
+    |
+     
+    ( theField = InTuneFreeTextField(theTune) [<COMMENT>]) 
+       {
+       theLine.addElement(new FieldElement(theField));
+       theTune.newLine(theLine);
+       }
+    |  
+    ( FieldWordsAligned(theTune)[<COMMENT>])+ // treat adjacent w: fields as a single field
+    |
+    ( resetLine = Element(theTune,theLine)  // sometimes (e.g. voice) we need to reset the line context
+           {
+           if (resetLine)
+               {
+               theTune.newLine(theLine);
+               theLine = theTune.getNewLine();
+               }
+           })+ {
+        theTune.newLine(theLine);
+        }
+   
+     
+  }
+   
+void InTuneField(Tune theTune,Line theLine) :
+   {
+   InfoField theField = new InfoField();
+   String fieldContents = null;
+   String fieldId = null;
+   boolean advanceLine = false;
+   }
+   {
+     (
+   	   (fieldContents  = FieldKey(theTune) )
+   	       {
+   	       fieldId = "K";
+   	       }
+   	   |(fieldContents = FieldMeter() )
+   	       {
+   	       fieldId = "M";
+   	       theTune.setMeter(fieldContents);
+   	       }
+   	   |(fieldContents = FieldDefaultLength() )
+   	       {
+   	       fieldId = "L";
+   	       
+   	       theTune.setDefaultNote(Integer.parseInt(fieldContents));
+               fieldContents = "1/"+fieldContents;
+   	       }
+   	   | (fieldContents = FieldTitle() )
+   	       {
+   	       fieldId = "T";
+   	       advanceLine = true;
+   	       }
+      | (fieldContents = FieldTempo(theTune) )
+   	       {
+   	       fieldId = "Q";
+   	       }
+   	   | (fieldContents = FieldParts())
+   	       {
+   	       fieldId = "P";
+   	       advanceLine = true; //FIXME probably should not cause advance
+   	       }
+ 
+   	  )
+   	     {
+   	     theField.setInfoString(fieldContents);
+   	     theField.setCode(fieldId);
+   	     // here, create a change element and add the field change to it
+   	     theLine.addElement(new FieldElement(theField));
+   	     // we don't advance line for in-tune changes, but we do for text
+   	     if (!advanceLine) 
+   	        theLine.setNoAdvance();
+   	     }            
+   }
+       
+void EndOfTune() :
+   {
+   }
+   {
+   <ENDOFTUNE> 
+   | <EOF> 
+   | Eol() <EOF>
+   }
+
+
+boolean Element(Tune theTune, Line theLine) :
+   {
+      AbcElement theElement = null;
+      boolean resetLine = false;
+   }
+   {
+      (
+      (
+        //LOOKAHEAD(2)
+	    theElement = NoteElement(theLine) 
+      | LOOKAHEAD(2)
+          theElement = Tuplet(theLine)
+       | theElement = BarLine()
+       | theElement = Repeat() 
+       | theElement = NthRepeat()
+       | theElement = BeginSlur()
+       | theElement = EndSlur()
+       | theElement = Space()
+       | theElement = GuitarChord(theLine)
+       |
+         resetLine = InLineFields(theTune,theLine) // force a line break
+          {
+          if (!resetLine) theElement = new SpaceElement(); // force a beam break 
+          }
+       )
+	 {
+	    theLine.addElement(theElement);
+         }
+      
+		| Decoration(theLine)
+		| GraceNotes(theLine)
+      | <COMMENT>  // don't add
+      )
+      {
+      return resetLine;
+      }
+   }
+
+void LineEnder(Tune theTune) :
+   {
+   }
+   {
+   [LineEndTreatment(theTune)[<WHITESPACE>] ] Eol() 
+   } 
+void LineEndTreatment(Tune theTune) :
+   {
+   }
+   {
+   (<BANG> )
+   | <BACKSLASH> 
+      {
+      if (theTune != null)  
+          theTune.setNoAdvance();
+      }
+   | (<SPLAT>)+ 
+   }
+AbcElement Tuplet(Line theLine) :
+   {
+   Tuplet theTuplet = new Tuplet();
+   }
+   {
+   (
+   TupletSpec(theTuplet)
+   (TupletContents(theTuplet,theLine))+
+   )
+       {
+       return theTuplet;
+       }
+   }
+
+void TupletSpec(Tuplet theTuplet) :
+   {
+   String notesNeeded = null;
+   }
+   {
+   <OPAREN>
+   notesNeeded = Digits()
+      {
+      theTuplet.setNumBeats(notesNeeded);
+      }
+   [ ComplexTupletTerm(theTuplet) ]
+   }
+
+void ComplexTupletTerm(Tuplet theTuplet) :
+   {
+   Token tok = null;
+   }
+   {
+   (tok = <TUPLET_TERM>{   // timeof
+      theTuplet.setTimeOf(tok.image.substring(1));
+      }
+   [tok = <TUPLET_TERM>{
+      theTuplet.setNumNotes(tok.image.substring(1));
+      }  
+    ])
+    |
+    tok = <TUPLET_TERM2>  // just the 'r'  p::r
+    {
+      theTuplet.setNumNotes(tok.image.substring(2));
+    }
+   } 
+void TupletContents(Tuplet theTuplet,Line theLine) :
+   {
+   AbcElement theElement=null;
+   localTuplet = theTuplet; // because lookahead doesn't look at args
+   }
+   {
+   LOOKAHEAD( {localTuplet.isNotFull()}) 
+       ((theElement = NoteElement(theLine)) | (theElement = MarkupElement(theLine)) )
+      {
+		if (theElement != null) { //FIXME KLUDGE because gracenotes and decos return null
+        theTuplet.addElement(theElement);
+		  }
+      }
+
+   }
+AbcElement MarkupElement(Line theLine) :
+   {
+   AbcElement theElement = null;
+   }
+   {
+   ((theElement = BeginSlur()) |
+    (theElement = EndSlur()) |
+    (theElement = Space()) |
+    (theElement = GuitarChord(theLine)) |
+	 (theElement = Decoration(theLine)) )
+       {
+       return theElement;
+       }
+    }
+   
+AbcElement BeginSlur() :
+   {
+   AbcElement theElement =  new SlurBegin();
+   }
+   {
+   <OPAREN>
+      {
+      return theElement;
+      }
+   }
+   
+AbcElement EndSlur() :
+   {
+   AbcElement theElement =  new SlurEnd();
+   }
+   {
+   <CPAREN>
+       {
+       return theElement;
+       }
+    }
+
+AbcElement NoteElement(Line theLine) :
+   {
+   AbcElement theElement=null;
+   }
+   {
+   (theElement = DecoratedNote()
+     | theElement = BrokenRhythm(theLine)
+	  |  Gracings(theLine)
+      )
+	 
+      {
+      return theElement;
+      }
+   }
+AbcElement DecoratedNote() :
+   {
+   AbcElement theElement=null;
+   }
+   {
+   (
+    theElement = Note()   
+	 |theElement = MultiNote()
+    )
+      {
+      return theElement;
+      }
+   }
+
+AbcElement BrokenRhythm(Line theLine):
+   {
+   int dotCount = 0;
+   BrokenRhythmElement broken = new BrokenRhythmElement();
+   }
+   {
+
+        dotCount = BrokenSeparator() {
+	    broken.setDotCount(dotCount);
+	    return broken;
+	    }  		
+   }
+
+int BrokenSeparator():
+    {
+    int dotCount = 0;
+    Token sepTok = null;
+    }
+    {
+      (
+       sepTok = <GT>
+	     {
+	     dotCount=sepTok.image.length();
+	     } 
+      |
+        sepTok = <LT>
+	     {
+	     dotCount=-sepTok.image.length();
+	     }
+	   )
+	     {
+	     return dotCount;
+	     }
+	 }        
+
+
+
+AbcElement MultiNote() :
+   {
+   MultiElement theMulti = new MultiElement();
+   AbcElement theNote = null;
+   }
+   {
+   (
+   
+   (<OBRACK>
+   (
+   theNote = DecoratedNote() 
+       {
+       theMulti.addElement(theNote);
+       }
+   )+
+   <CBRACK>)
+   |
+      (<OPLUS>
+   (
+   theNote = DecoratedNote() 
+       {
+       theMulti.addElement(theNote);
+       }
+   )+
+   <CPLUS>)
+   )
+
+      {
+      return theMulti;
+      }
+   }
+
+AbcElement Note() :
+   {
+   AbcElement theElement=null;
+   MusicLength  theLength=null;
+   }
+   {
+   theElement = NoteOrRest() 
+   [
+      theLength = NoteLength()
+         {
+         ((MusicElement)theElement).setLength(theLength);
+         }
+   ]
+   [
+      Tie()
+	 {
+	 ((MusicElement)theElement).setTied();
+	 }
+   ]
+      {
+	 return theElement;
+      }
+
+   }
+
+void Tie():
+   {
+   }
+   {
+   <MINUS>
+   }
+
+void Gracings(Line theLine):
+   {
+	
+   Token graceToken = null;
+   }
+   {
+   (graceToken = <GRACING>
+      {
+      theLine.addSimpleOrnament(graceToken.image);
+      })
+   }
+
+//we return null because we don't want the gracenotes as a separate element
+AbcElement GraceNotes(Line theLine):
+   {
+   Grace theGrace = new Grace();
+   AbcElement theNote = null;
+   MusicLength theLength =null;
+   }
+   {
+   <OBRACE>
+   (
+   (theNote = Pitch() 
+      {
+      theGrace.addElement(theNote);
+      }
+   )
+   [theLength = NoteLength()
+       {
+       ((MusicElement)theNote).setLength(theLength);
+       }
+   ]       
+   )*
+   <CBRACE>
+      {
+      if (theGrace.size() > 0){
+         theLine.setGrace(theGrace);
+	 }
+	   return null;
+      }
+   }
+
+AbcElement GuitarChord(Line theLine):
+   {
+   Token theChord = null;
+   GuitarChordElement theGC = new GuitarChordElement();
+   }
+   {
+   (theChord =  <QUOTEDSTRING> ) 
+       {
+       theGC.setChord(theChord.image);
+       theLine.addGuitarChord(theGC);
+       return null;
+       }
+   }
+AbcElement Decoration(Line theLine):
+   {
+   Token theDec = null;
+   DecorationElement theDeco = new DecorationElement();
+   }
+   {
+   (theDec =  <BANGEDSTRING> ) 
+       {
+       theDeco.setDeco(theDec.image);
+		 theLine.addDecoration(theDeco);
+       return null;
+       }
+   }
+
+AbcElement NoteOrRest() :
+   {
+   AbcElement theElement = null;
+   }
+   {
+   (
+      theElement = Pitch() | theElement = Rest() | theElement = InvisibleRest()
+   )
+      {
+	 return theElement;
+      }
+   }
+
+MusicElement Pitch() :
+   {
+      MusicElement theElement = new MusicElement();
+      String thePitch;
+   }
+   {
+   (
+   [
+   Accidental(theElement)
+   ]
+   thePitch = BaseNote()
+      {
+	 theElement.setPitch(thePitch);
+      }
+   [
+   Octave(theElement)
+   ]
+   )
+      {
+      return theElement;
+      }
+   }
+
+void Accidental(MusicElement theElement) :
+   {
+   }
+   {
+    <CARET2>
+	{theElement.doubleSharpen();}
+   | <CARET>
+	{theElement.sharpen();}
+   | <UNDER> 
+	{theElement.flatten();}
+   | <UNDER2>
+	{theElement.doubleFlatten();}
+   | <EQUALS>
+	{theElement.natural();}
+   }
+
+void Octave(MusicElement theElement) :
+   {
+   }
+   {
+      (HiOctave(theElement))+
+      | (LoOctave(theElement))+
+   }
+
+void HiOctave(MusicElement theElement):
+   {
+   }
+   {
+      <APOS>
+	 {
+	 theElement.upOctave();
+	 }
+   }
+
+void LoOctave(MusicElement theElement):
+   {
+   }
+   {
+     <COMMA>
+	 {
+	 theElement.downOctave();
+	 }
+   }
+
+MusicLength  NoteLength() :
+   {
+      MusicLength theLength = new MusicLength();
+      String theNumerator = "1";
+      String theDenominator = "1";
+      Token t = null;
+
+
+   }
+   {
+   (
+      // XXX for now, treat double slash as a special case - should be fixed for ///,etc
+        ( t = <SLASHES> {theDenominator="4";})
+       |
+        (theNumerator = Digits()
+	   
+	    	[
+	    	 (<SLASH> {theDenominator = "2";}  // default to half length if no denom. 
+	    	   [
+	     	   theDenominator = Digits()
+	     	   ]
+	     	 )  
+	     	]
+	     )	
+	 	| 
+	 	 (
+	 		 <SLASH> 
+	      
+	           {
+	           theDenominator = "2";
+	           Debug.output(2,"length has no numerator");
+	           }  // default to half length if no denom. 
+	    	[theDenominator = Digits()]
+	      )
+	  )    
+   
+        {
+	    theLength.setNumerator(theNumerator);
+	    theLength.setDenominator(theDenominator);
+	    return theLength;
+        }
+
+   }
+
+String BaseNote() :
+   {
+   Token noteToken=null;
+   }
+   {
+   (
+   noteToken = <HINOTE> | noteToken = <LONOTE>
+   )
+      {
+      return noteToken.image;
+      }
+   }
+
+AbcElement Rest() :
+   {
+   MusicElement theElement = new RestElement();
+   }
+   {
+   <RESTNOTE> 
+      {
+      return theElement;
+      }
+   }
+   
+AbcElement InvisibleRest() :
+   {
+   InvisibleRestElement theElement = new InvisibleRestElement();
+   Token irToken = null;
+   }
+   {
+   irToken = <INVREST> 
+      {
+      theElement.setType(irToken.image);
+      return theElement;
+      }
+   }
+   
+
+AbcElement BarLine() :
+   {
+   BarLineElement theElement = new BarLineElement(); 
+   Token barLineToken = null;
+   }
+   {
+   barLineToken = <BARLINE>
+      {
+      theElement.setSymbol(barLineToken.image);
+      return theElement;
+      }
+   }
+
+AbcElement Repeat() :
+   {
+   RepeatElement theElement = new RepeatElement(); 
+   Token repeatToken = null;
+   }
+   {
+   repeatToken = <REPEATSIGN>
+      {
+      theElement.setSymbol(repeatToken.image);
+      theElement.setDirection();
+      return theElement;
+      }
+   }
+   
+AbcElement NthRepeat() :
+   {
+   NthRepeatElement theElement = new NthRepeatElement(); 
+   Token reptToken = null;
+   }
+   {
+   reptToken = <NTHREPEAT>
+      {
+      Debug.output(2,"Nth repeat: token is "+reptToken.image);
+      theElement.setSymbol(reptToken.image);
+      theElement.setRepeatNumber();
+      return theElement;
+      }
+   }
+
+
+AbcElement Space() :
+   {
+   AbcElement theElement = new SpaceElement();
+   }
+   {
+   <WHITESPACE>
+      {
+      return theElement;
+      }
+   }
+   
+boolean InLineFields(Tune theTune, Line theLine) :
+   {
+   AbcElement theElement = null;
+   boolean resetLine = false;
+   }
+   {
+      (
+        theElement = InLineMeter(theTune)
+      | theElement = InLineKey(theTune)
+      | theElement = InLineLength(theTune,theLine)
+      | theElement = InLineVoice(theTune,theLine) // returns null
+          {
+          resetLine = true;
+          }
+      )
+      {  
+	  theLine.addElement(theElement);
+      return resetLine;
+      }
+
+      
+   }
+
+AbcElement InLineMeter(Tune theTune) :
+   {
+   //FieldElement theMeter = null;
+   MeterElement theMeter = null;
+   String fieldContents;
+   }
+   {
+     (
+     <METERICHANGE>
+     fieldContents = RestOfInlineField()
+     <ENDIFIELD>
+     )
+      {
+      theMeter = new MeterElement(fieldContents);
+      return theMeter;
+      }
+    }  
+AbcElement InLineKey(Tune theTune) :
+    {
+    KeysigElement theKey = null;
+    String fieldContents;
+    }
+    {
+      (
+      <KEYICHANGE>
+      fieldContents = RestOfInlineField()
+      <ENDIFIELD>
+      )
+        {
+        theKey = new KeysigElement(fieldContents);  //FIXME parser should handle keysig properly
+		theTune.setKey(fieldContents);
+        return theKey;
+        }
+      }  
+    
+String RestOfInlineField() :
+   {
+   Token rof =null;
+   }
+   {
+   rof = <RESTOFIFIELD>
+     {
+     return rof.image;
+     }
+   }  
+AbcElement InLineLength(Tune theTune,Line theLine) :
+    {
+    LengthElement theLen = null;
+    String denom;
+    int d;
+    }
+    {
+      (
+      <LENGTHICHANGE>
+      denom = NoteLengthStrict() [<WHITESPACE>]
+      <CBRACK>
+      )
+        {
+        d = Integer.parseInt(denom);
+        theLen = new LengthElement(d); //OK if zero
+        theTune.setDefaultDuration(theLen.getDefaultDuration());  // for next line
+        theLine.setDefaultNoteDuration(theTune.getDefaultDuration());  // for current line
+        return theLen;
+        
+        }
+      }  
+AbcElement InLineVoice(Tune theTune, Line theLine) :
+    {
+    InfoField theField;
+    }
+    {
+    <VOICEICHANGE>          
+    (theField = FieldVoice(theTune)
+    <VOICE_END_INLINE>)
+       {
+
+       return null ;//new FieldElement(theField);
+       }
+    }   
+/////
+//
+// Lexer
+
+TOKEN:
+   {
+     <#DIGIT: ["0"-"9"] >
+   | <#COMMENT1: ([" ","\t"])* "%" (~["\n"])*>  
+   | <#TEXT: (~["\n","%"])*>
+   | <#NONEMPTYTEXT: (~["\n","%"])+>
+   | <#ENDOFLINE:  ([" ","\t"])* "\n">
+   }
+
+<DEFAULT>
+TOKEN:
+   { 
+       <INDEX: "X:"> : TUNEHEADER              // found an index line, parse as tune
+     | <COMMENTLINE: <COMMENT1> >              // return the comment 
+     | <TEXTLINE: (~["X","\n","\r"] <TEXT> )             // just a line of text, NOT index. 
+                      |( "X" ~[":"] <TEXT>)
+                      |( ~["\n","\r"] ) >  //  Note that lexer will match longest potential token  in a given state 
+      // FIXME - I can actually simplify this by handling file-scoped fields ["A"-"Z"] ":"
+   }
+
+   
+// note that the order is very important for the comment handling
+// end of tune is two blank lines in any state
+<TUNEBODY,EATTEXT,KEY_STATE,EATLINE,EATINLINE,AW_PROCESS,TUNEHEADER,FIRSTHISTORY,INHISTORY,VOICE_STATE,VOICE_TUNE_STATE,VOICE_INLINE_STATE>
+TOKEN: {
+       <ENDOFTUNE: ([" ","\t"])* "\n" ([" ","\t"])* "\n" > :DEFAULT
+     | <COMMENT: <COMMENT1> >
+     } 
+
+<TUNEBODY,DEFAULT,EATTEXT,EATLINE,EATINLINE,TUNEHEADER>
+TOKEN: {
+     <EOL: <ENDOFLINE> > 
+     } 
+
+   
+<TUNEBODY,TUNEHEADER,INPLUSCHORD>
+TOKEN:
+   { 
+   <WHITESPACE: ([" ","\t"])+ >
+   | <EQUALS: "=" >
+   | <SLASH: "/" >
+}
+
+<INPLUSCHORD,TUNEBODY>
+TOKEN:
+    {
+      <HINOTE: ["a"-"g"] >
+    | <LONOTE: ["A"-"G"] >
+    | <RESTNOTE: "z" >
+    | <MINUS: "-" >
+    | <OBRACE: "{" >
+    | <CBRACE: "}" >
+    | <INVREST: "x" | "y" >
+    | <DIGITS: (<DIGIT>)+ >
+    | <CARET2: "^^" >
+    | <CARET: "^" >
+    | <UNDER2: "__" >
+    | <UNDER: "_" >
+    | <APOS: "\'" >
+    | <COMMA: "," >
+    | <SLASHES: "//" >
+    }
+
+<INPLUSCHORD>
+TOKEN:
+    {
+    <CPLUS: "+" >: TUNEBODY 
+    }
+
+// free text fields usable in header and tune body  
+<TUNEBODY,TUNEHEADER,INHISTORY>
+TOKEN:
+   {
+      <INFO:       "I:" <TEXT> >
+    | <TITLE:      "T:" <TEXT> > 
+    | <NOTES:      "N:" <TEXT> >
+    | <ORIGIN:     "O:" <TEXT> >
+    | <RHYTHM:     "R:" <TEXT> >
+    | <SOURCE:     "S:" <TEXT> >
+    | <WORDS:      "W:" <TEXT> >
+    | <TRANSNOTES: "Z:" <TEXT> >
+
+      
+   }
+          
+<TUNEBODY>
+   
+TOKEN:
+   {
+  
+      <KEYCHANGE: "K:">: KEY_STATE
+    | <METERCHANGE: "M:">: EATLINE
+	| <VOICE_CHANGE: "V:">: VOICE_TUNE_STATE
+    | <METERICHANGE: "[M:">: EATINLINE
+    | <KEYICHANGE: "[K:">: EATINLINE
+	| <VOICEICHANGE: "[V:">: VOICE_INLINE_STATE
+    | <TEMPOCHANGE: "Q:">   // don't change state - stay and parse
+    | <LENGTHCHANGE: "L:"> 
+    | <LENGTHICHANGE: "[L:"> 
+    | <PARTCHANGE: "P:"> :EATLINE
+    | <WORDS_ALIGNED: "w:" > : AW_PROCESS
+    | <OBRACK: "[" >
+    | <CBRACK: "]" >
+    | <OPAREN: "(" >
+    | <COLON: ":" >
+    | <TUPLET_TERM: ":"<DIGIT> > // handling general tuplet spec
+    | <TUPLET_TERM2: "::"<DIGIT> >
+    | <CPAREN: ")" >
+    | <OPLUS: "+" >: INPLUSCHORD
+    | <BARLINE: "||" 
+	       | "[|" 
+	       | "|]" 
+	       | "|" >
+    | <REPEATSIGN: ":|" 
+	       | "|:" 
+	       | "::" >
+    | <NTHREPEAT: "[1"
+		| "[2"
+		| "|1"
+		| "|2"
+		| ":|2"
+		| ":|]2" 
+		| ":|[2">
+    | <QUOTEDSTRING:  "\"" (~["\""])+ "\"" >
+    | <BANGEDSTRING: "!" (~["!","\n","\r"])+ "!" >
+    | <BANG: "!" >
+    | <SPLAT: "*">
+    | <BACKSLASH: "\\">
+
+   }
+   
+<INPLUSCHORD,TUNEBODY>
+TOKEN:
+    {
+    <GRACING: "~"
+	      | "."
+			| ["h"-"w"]
+			| ["H"-"Z"] >
+    | <GT:  (">")+ >
+    | <LT:  ("<")+ >
+    | <INVALID: ~[] >
+
+   
+     }        
+
+	       
+<TUNEHEADER,INHISTORY>
+TOKEN:
+    {
+
+      <HDIGITS: (<DIGIT>)+ >
+    | <LENGTH: "L:"> :   TUNEHEADER // explicitly change state to TUNEHEADER in cased we're processing H:
+    | <KEY: "K:"> :      KEY_STATE     
+    | <METER: "M:"> :    EATTEXT   // replace with real meter
+    | <AREA: "A:" <TEXT> > 
+    | <BOOK: "B:" <TEXT> > 
+    | <COMPOSER: "C:" <TEXT> >  
+    | <DISC: "D:" <TEXT> >
+    | <FILE: "F:"  <TEXT> >
+    | <GROUP: "G:" <TEXT> >
+    | <HISTORY: "H:" >
+       {Debug.output(1,"HISTORY - Current lex. state: "+curLexState+" image: "+image.toString());} :   FIRSTHISTORY  // history is multiline
+    | <TEMPO:  "Q:"> :   TUNEHEADER // explicitly change state to TUNEHEADER in cased we're processing H:
+    | <PARTS:  "P:"> :   EATTEXT   // replace with real parts
+    | <ELEMSKIP: "E:"   <TEXT> >
+    | <VOICE: "V:"> : VOICE_STATE
+    | <TEXHEADER: "\\"  <TEXT> >  }
+  
+<TUNEHEADER>
+TOKEN:     
+     {
+    <EXTRAHEADER: ~[] > 
+    }
+
+// In a history field - check for fields
+//NOTE: the lexer will match the LONGEST string first, then will take the first match
+//      for equal length strings, so I need to ensure
+//      that a field (and its contents) will _NOT_ match the free text 
+
+<INHISTORY>
+TOKEN:
+    {
+    <MOREHIST2: 
+
+          (["A"-"Z"] ~[":","\n"] (~["\n"])* ) //  2+ chars not a field 
+        | ( ~["A"-"Z","\n"]   (~["\n"])*) // 1+ but no field code
+        | ~["\n"]   // one char  
+        >       
+        //{Debug.output(0,"MOREHIST2 - Current lex. state: "+curLexState+" image: "+image.toString());}
+      
+     }
+        
+// In a history field - could be multiline
+<FIRSTHISTORY >
+TOKEN:
+    {
+    <MOREHIST: <NONEMPTYTEXT> >
+    // {Debug.output(0,"MOREHIST - Current lex. state: "+curLexState+" image: "+image.toString());}
+  
+    }
+<FIRSTHISTORY,INHISTORY>
+TOKEN:
+	{
+	<HIST_EOL:<ENDOFLINE> > : INHISTORY
+	}
+    
+// process aligned words
+
+<AW_PROCESS>
+TOKEN:
+  {
+  <AW_EOL: <ENDOFLINE>  > : TUNEBODY
+  | <AW_NEXTBAR: "|" > 
+  | <AW_LITDASH: "\\-" >
+ | <AW_SYLBREAK: "-" >
+  | <AW_HOLDSYL: "_" >
+  | <AW_SKIP: "*" >
+  | <AW_JOIN: "~" >
+  | <AW_CONTINUE: "\\" ([" ","\t"])* "\n" >
+  | <AW_TEXESCAPE: "\\" > // escaped char, not line endf
+  | <AW_WSPACE: ([" ","\t"])+ >
+  | <AW_WORD: (~[" ","\t","\n","|","\\","-","*","~","_"])+ >
+  }
+
+	     
+           
+
+
+// consume text until end of line (within tuneheader)
+
+<EATTEXT>
+TOKEN:
+   {
+   <RESTOFLINE: <TEXT> > : TUNEHEADER
+   }
+   
+   
+// consume text until end of line (key sig goes to tune)
+
+
+<KEY_STATE,VOICE_STATE,VOICE_TUNE_STATE,VOICE_INLINE_STATE>
+SKIP:
+   {
+   " "
+   |"\t"
+   }
+   
+<KEY_STATE,VOICE_STATE,VOICE_TUNE_STATE,VOICE_INLINE_STATE>
+TOKEN:
+   {
+     <KV_NONE: "none" >
+   | <KV_EQUALS: "=" >
+   | <CLEF_CLEF: "clef" >
+   | <CLEF_TYPE: ("treble" | "bass" | "tenor" | "alto" | "perc" ) >
+   | <CLEF_OCTAVA: ("+8" | "-8") >
+   | <CLEF_TRANSPOSE: "transpose" >
+   | <CLEF_MIDDLE: "middle" >
+   }
+   
+<KEY_STATE>
+TOKEN:
+   {
+     <KEY_HP1: "HP" >
+   | <KEY_HP2: "Hp" >
+   | <KEY_MODE: 
+     ["m","M"]["a","A"]["j","J"]  (["o","O"]["r","R"])?  							//maj[or]
+     | ["i","I"]["o","O"]["n","N"] (["i","I"]["a","A"]["n","N"])? 					//ion[ian]
+     | ["d","D"]["o","O"]["r","R"] (["i","I"]["a","A"]["n","N"])?  					//dor[ian]
+     | ["p","P"]["h","H"]["r","R"] (["y","Y"]["g","G"]["i","I"]["a","A"]["n","N"])? //phry[gian]
+     | ["l","L"]["y","Y"]["d","D"] (["i","I"]["a","A"]["n","N"])? 					//lyd[ian]
+     | ["m","M"]["i","I"]["x","X"] (["o","O"]["l","L"]["y","Y"]["d","D"]["i","I"]["a","A"]["n","N"])?	//mix[olydian]
+     | ["m","M"]["i","I"]["n","N"] (["o","O"]["r","R"])? 							//min[or]
+     | ["m","M"] 					//m
+     | ["a","A"]["e","e"]["o","O"] (["l","L"]["i","I"]["a","A"]["n","N"])?  //aeo[lian]
+     | ["l","L"]["o","O"]["c","C"] (["r","R"]["i","I"]["a","A"]["n","N"])? >//loc[rian]
+   
+   | <KEY_TONIC: ["A"-"G","a"-"g"]("b"|"#")? >
+ 
+   | <KEY_EOL: <ENDOFLINE> > : TUNEBODY
+   }
+
+ <VOICE_INLINE_STATE>
+ TOKEN:
+   {
+   <VOICE_END_INLINE: "]"> : TUNEBODY
+   }
+   
+ <VOICE_STATE> 
+ TOKEN:
+   { 
+    <VOICE_EOL: <ENDOFLINE> > : TUNEHEADER
+   } 
+   
+ <VOICE_TUNE_STATE> 
+ TOKEN:
+   { 
+    <VOICE_TUNE_EOL: <ENDOFLINE> > : TUNEBODY
+   } 
+
+<VOICE_STATE,VOICE_TUNE_STATE,VOICE_INLINE_STATE>
+TOKEN:
+   {
+     <VOICE_NAME: ("name" | "nm") >
+   | <VOICE_SUBNAME: ("subname" | "snm" ) >
+   | <VOICE_STEMS: "stems" >
+   | <VOICE_STEM_DIRECTION: ("up" | "down" | "normal") >
+   | <VOICE_MINUS: "-" >
+   | <VOICE_DIGITS: <DIGITS> >
+   | <VOICE_QSTRING:  "\"" (~["\""])+ "\"" >
+   | <VOICE_ID: (~[" ","\t","\n","%","=","]"])+ >
+   }
+<KEY_STATE,VOICE_STATE,VOICE_TUNE_STATE,VOICE_INLINE_STATE>
+TOKEN:
+   {
+    <KV_INVALID: ~[] >
+    }
+   
+// consume text until end of line (within music)
+<EATLINE>
+TOKEN:
+   {
+   <RESTOFFIELD: <TEXT> > : TUNEBODY
+   }
+// consume text until "]"
+
+<EATINLINE>
+TOKEN:
+   {
+   <RESTOFIFIELD: (~[ "]" ])+ >
+   | <ENDIFIELD: "]" > :TUNEBODY
+   }   
